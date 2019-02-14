@@ -5,7 +5,7 @@
 ;; Author: Artem Khramov <futu.fata@gmail.com>
 ;; Created: 6 Jan 2017
 ;; Version: 0.2.4
-;; Package-Requires: ((alert "1.2") (dash "2.13.0") (emacs "24.4"))
+;; Package-Requires: ((alert "1.2") (async "1.9.3") (dash "2.13.0") (emacs "24.4"))
 ;; Keywords: notification alert org org-agenda agenda
 ;; URL: https://github.com/akhramov/org-wild-notifier.el
 
@@ -45,6 +45,7 @@
 
 (require 'dash)
 (require 'alert)
+(require 'async)
 (require 'org-agenda)
 (require 'cl-lib)
 
@@ -181,12 +182,24 @@ Returns a list of notification messages"
       (-remove 'org-wild-notifier--entry-blacklisted-p markers)
     markers))
 
-(defun org-wild-notifier--retrieve-events ()
-  "Get events from agenda view."
-  (->> (org-split-string (buffer-string) "\n")
-       (--map (plist-get
-               (org-fix-agenda-info (text-properties-at 0 it))
-               'org-marker))
+(defun org-wild-notifier--retrieve-agenda-view ()
+  "Get agenda buffer content."
+  (async-sandbox
+   `(lambda ()
+      (let ((org-agenda-use-time-grid nil)
+            (org-agenda-compact-blocks t))
+        (require 'subr-x)
+        (org-agenda-list 2
+                         (org-read-date nil nil "today"))
+        (thread-last (org-split-string (buffer-string) "\n")
+          (mapcar (lambda (it)
+                    (plist-get
+                     (org-fix-agenda-info (text-properties-at 0 it))
+                     'org-marker))))))))
+
+(defun org-wild-notifier--retrieve-events (agenda-view)
+  "Get events from AGENDA-VIEW."
+  (->> agenda-view
        (-non-nil)
        (org-wild-notifier--apply-whitelist)
        (org-wild-notifier--apply-blacklist)
@@ -234,7 +247,6 @@ MARKER acts like event's identifier."
     (title . ,(org-wild-notifier--extract-title marker))
     (intervals . ,(org-wild-notifier--extract-notication-intervals marker))))
 
-
 (defun org-wild-notifier--stop ()
   "Stops the notification timer."
   (-some-> org-wild-notifier--timer (cancel-timer)))
@@ -256,28 +268,13 @@ smoother experience this function also runs a check without timer."
 (defun org-wild-notifier-check ()
   "Parse agenda view and notify about upcomming events."
   (interactive)
-  (save-window-excursion
-    (save-restriction
-        (let ((org-agenda-use-time-grid nil)
-              (org-agenda-compact-blocks t)
-              (org-agenda-window-setup 'current-window)
-              (org-agenda-buffer-name nil)
-              (org-agenda-buffer-tmp-name org-wild-notifier--agenda-buffer-name)
-              (already-opened org-agenda-new-buffers))
-
-          (org-agenda-list 2 (org-read-date nil nil "today"))
-
-          (-each
-            (->> (org-wild-notifier--retrieve-events)
-                 (-map 'org-wild-notifier--check-event)
-                 (-flatten)
-                 (-uniq))
-            'org-wild-notifier--notify)
-
-          (let ((newly-opened
-                 (cl-set-difference org-agenda-new-buffers already-opened)))
-            (org-release-buffers newly-opened)
-            (org-agenda-Quit))))))
+  (-each
+      (->> (org-wild-notifier--retrieve-agenda-view)
+           (org-wild-notifier--retrieve-events)
+           (-map 'org-wild-notifier--check-event)
+           (-flatten)
+           (-uniq))
+    'org-wild-notifier--notify))
 
 ;;;###autoload
 (define-minor-mode org-wild-notifier-mode
